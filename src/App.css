@@ -40,7 +40,26 @@ body {
 	flex-wrap: wrap;
 }
 
+.diff-side-by-side {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+}
+
+.diff-column {
+	flex: 1;
+	min-width: 260px;
+	display: flex;
+	flex-direction: column;
+}
+
+.diff-column-title {
+	font-weight: 600;
+	margin-bottom: 8px;
+}
+
 .diff-viewer {
+	flex: 1;
 	padding: 16px;
 	border: 1px dashed #d9d9d9;
 	background: #ffffff;
@@ -67,4 +86,28 @@ body {
 .result-placeholder {
 	margin-top: 32px;
 	text-align: center;
+}
+
+.pdf-preview {
+	margin-top: 16px;
+	height: 520px;
+	border: 1px solid #d9d9d9;
+	border-radius: 8px;
+	overflow: hidden;
+	background: #fafafa;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.pdf-preview.empty {
+	border-style: dashed;
+	color: #8c8c8c;
+}
+
+.pdf-iframe {
+	width: 100%;
+	height: 100%;
+	border: 0;
+	background: #ffffff;
 }

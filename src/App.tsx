@@ -42,6 +42,13 @@ type DiffWorkerResponse =
   | { type: 'result'; jobId: number; payload: Change[] }
   | { type: 'error'; jobId: number; payload: string }
 
+type DiffSegmentType = 'unchanged' | 'added' | 'removed'
+
+type DiffSegment = {
+  value: string
+  type: DiffSegmentType
+}
+
 async function extractTextFromPdf(file: File): Promise<string> {
   const data = await file.arrayBuffer()
   const pdf = await getDocument({ data }).promise
@@ -80,6 +87,8 @@ async function extractTextFromPdf(file: File): Promise<string> {
 function App() {
   const [pdf1, setPdf1] = useState<File | null>(null)
   const [pdf2, setPdf2] = useState<File | null>(null)
+  const [pdf1Url, setPdf1Url] = useState<string | null>(null)
+  const [pdf2Url, setPdf2Url] = useState<string | null>(null)
   const [diffParts, setDiffParts] = useState<Change[]>([])
   const [isComparing, setIsComparing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -138,6 +147,34 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!pdf1) {
+      setPdf1Url(null)
+      return
+    }
+
+    const objectUrl = URL.createObjectURL(pdf1)
+    setPdf1Url(objectUrl)
+
+    return () => {
+      URL.revokeObjectURL(objectUrl)
+    }
+  }, [pdf1])
+
+  useEffect(() => {
+    if (!pdf2) {
+      setPdf2Url(null)
+      return
+    }
+
+    const objectUrl = URL.createObjectURL(pdf2)
+    setPdf2Url(objectUrl)
+
+    return () => {
+      URL.revokeObjectURL(objectUrl)
+    }
+  }, [pdf2])
+
+  useEffect(() => {
     let isCancelled = false
 
     const compare = async () => {
@@ -145,14 +182,14 @@ function App() {
         setDiffParts([])
         setIsComparing(false)
         setError(null)
-          setComparisonNote(null)
+        setComparisonNote(null)
         return
       }
 
       setIsComparing(true)
       setError(null)
       setDiffParts([])
-        setComparisonNote(null)
+      setComparisonNote(null)
 
       try {
         const [text1, text2] = await Promise.all([
@@ -164,29 +201,29 @@ function App() {
           return
         }
 
-          const totalLength = text1.length + text2.length
-          if (totalLength > ABSOLUTE_DIFF_LIMIT) {
+        const totalLength = text1.length + text2.length
+        if (totalLength > ABSOLUTE_DIFF_LIMIT) {
           setError(
-              `Documents are too large for an in-browser comparison (combined text length ${totalLength.toLocaleString()} characters). Try comparing smaller sections.`,
+            `Documents are too large for an in-browser comparison (combined text length ${totalLength.toLocaleString()} characters). Try comparing smaller sections.`,
           )
           setDiffParts([])
           setIsComparing(false)
-            setComparisonNote(null)
+          setComparisonNote(null)
           return
         }
 
-          let mode: DiffMode = 'word'
-          if (totalLength > PARAGRAPH_DIFF_THRESHOLD) {
-            mode = 'sentence'
-            setComparisonNote(
-              'Large documents are compared at sentence level for faster results. Highlights may be less granular.',
-            )
-          } else if (totalLength > WORD_DIFF_THRESHOLD) {
-            mode = 'paragraph'
-            setComparisonNote(
-              'Medium documents are compared at paragraph level to balance speed and detail.',
-            )
-          }
+        let mode: DiffMode = 'word'
+        if (totalLength > PARAGRAPH_DIFF_THRESHOLD) {
+          mode = 'sentence'
+          setComparisonNote(
+            'Large documents are compared at sentence level for faster results. Highlights may be less granular.',
+          )
+        } else if (totalLength > WORD_DIFF_THRESHOLD) {
+          mode = 'paragraph'
+          setComparisonNote(
+            'Medium documents are compared at paragraph level to balance speed and detail.',
+          )
+        }
 
         const worker = workerRef.current
 
@@ -194,15 +231,15 @@ function App() {
           jobCounterRef.current += 1
           const jobId = jobCounterRef.current
           pendingJobIdRef.current = jobId
-            const payload: DiffWorkerRequest = { jobId, text1, text2, mode }
+          const payload: DiffWorkerRequest = { jobId, text1, text2, mode }
           worker.postMessage(payload)
         } else {
-            const parts =
-              mode === 'sentence'
-                ? diffSentences(text1, text2)
-                : mode === 'paragraph'
-                ? diffLines(text1, text2)
-                : diffWords(text1, text2)
+          const parts =
+            mode === 'sentence'
+              ? diffSentences(text1, text2)
+              : mode === 'paragraph'
+              ? diffLines(text1, text2)
+              : diffWords(text1, text2)
           setDiffParts(parts)
           setIsComparing(false)
         }
@@ -221,7 +258,7 @@ function App() {
         setError(normalizedMessage)
         setDiffParts([])
         setIsComparing(false)
-          setComparisonNote(null)
+        setComparisonNote(null)
       }
     }
 
@@ -251,6 +288,24 @@ function App() {
     })
 
     return { added, removed }
+  }, [diffParts])
+
+  const { leftSegments, rightSegments } = useMemo(() => {
+    const left: DiffSegment[] = []
+    const right: DiffSegment[] = []
+
+    diffParts.forEach((part) => {
+      if (part.added) {
+        right.push({ value: part.value, type: 'added' })
+      } else if (part.removed) {
+        left.push({ value: part.value, type: 'removed' })
+      } else {
+        left.push({ value: part.value, type: 'unchanged' })
+        right.push({ value: part.value, type: 'unchanged' })
+      }
+    })
+
+    return { leftSegments: left, rightSegments: right }
   }, [diffParts])
 
   const buildUploadProps = (
@@ -310,6 +365,14 @@ function App() {
               <p className="ant-upload-text">Click or drag a PDF file into this area</p>
               <p className="ant-upload-hint">Choose the baseline document</p>
             </Dragger>
+
+            <div className={pdf1Url ? 'pdf-preview' : 'pdf-preview empty'}>
+              {pdf1Url ? (
+                <iframe src={pdf1Url} title="First PDF preview" className="pdf-iframe" />
+              ) : (
+                <Text type="secondary">Upload a PDF to see it here.</Text>
+              )}
+            </div>
           </Card>
         </Col>
 
@@ -322,6 +385,14 @@ function App() {
               <p className="ant-upload-text">Click or drag a PDF file into this area</p>
               <p className="ant-upload-hint">Choose the document to compare against</p>
             </Dragger>
+
+            <div className={pdf2Url ? 'pdf-preview' : 'pdf-preview empty'}>
+              {pdf2Url ? (
+                <iframe src={pdf2Url} title="Second PDF preview" className="pdf-iframe" />
+              ) : (
+                <Text type="secondary">Upload a PDF to see it here.</Text>
+              )}
+            </div>
           </Card>
         </Col>
       </Row>
@@ -338,9 +409,7 @@ function App() {
 
           {!isComparing && !error && (
             <Space direction="vertical" size={16} className="result-content">
-              {comparisonNote && (
-                <Alert type="info" showIcon message={comparisonNote} />
-              )}
+              {comparisonNote && <Alert type="info" showIcon message={comparisonNote} />}
 
               <div className="result-summary">
                 <Tag color={diffStats.added > 0 ? 'green' : 'default'}>
@@ -352,20 +421,54 @@ function App() {
               </div>
 
               {hasDiffHighlights ? (
-                <div className="diff-viewer">
-                  {diffParts.map((part, index) => {
-                    const className = part.added
-                      ? 'diff-part added'
-                      : part.removed
-                      ? 'diff-part removed'
-                      : 'diff-part'
+                <div className="diff-side-by-side">
+                  <div className="diff-column">
+                    <div className="diff-column-title">First PDF</div>
+                    <div className="diff-viewer">
+                      {leftSegments.length > 0 ? (
+                        leftSegments.map((segment, index) => {
+                          const classes = ['diff-part']
+                          if (segment.type === 'added') {
+                            classes.push('added')
+                          } else if (segment.type === 'removed') {
+                            classes.push('removed')
+                          }
 
-                    return (
-                      <span key={`${part.value}-${index}`} className={className}>
-                        {part.value}
-                      </span>
-                    )
-                  })}
+                          return (
+                            <span key={`result-left-${index}`} className={classes.join(' ')}>
+                              {segment.value}
+                            </span>
+                          )
+                        })
+                      ) : (
+                        <Text type="secondary">No content.</Text>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="diff-column">
+                    <div className="diff-column-title">Second PDF</div>
+                    <div className="diff-viewer">
+                      {rightSegments.length > 0 ? (
+                        rightSegments.map((segment, index) => {
+                          const classes = ['diff-part']
+                          if (segment.type === 'added') {
+                            classes.push('added')
+                          } else if (segment.type === 'removed') {
+                            classes.push('removed')
+                          }
+
+                          return (
+                            <span key={`result-right-${index}`} className={classes.join(' ')}>
+                              {segment.value}
+                            </span>
+                          )
+                        })
+                      ) : (
+                        <Text type="secondary">No content.</Text>
+                      )}
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <Alert
