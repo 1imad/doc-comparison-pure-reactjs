@@ -22,7 +22,7 @@ import {
   type Change,
 } from 'diff'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
-import type { PDFDocumentProxy, TextItem } from 'pdfjs-dist/types/src/display/api'
+import type { PDFDocumentProxy, RenderTask, TextItem } from 'pdfjs-dist/types/src/display/api'
 import pdfWorker from 'pdfjs-dist/build/pdf.worker?url'
 import './App.css'
 
@@ -234,7 +234,8 @@ function PdfViewerWithHighlights({
     }
 
     let cancelled = false
-    let pdfInstance: PDFDocumentProxy | null = null
+      let pdfInstance: PDFDocumentProxy | null = null
+      const activeRenderTasks: RenderTask[] = []
 
     const renderDocument = async () => {
       try {
@@ -253,27 +254,34 @@ function PdfViewerWithHighlights({
 
           const page = await pdf.getPage(pageIndex + 1)
           const baseViewport = page.getViewport({ scale: 1 })
-          const horizontalPadding = 24
-          const availableWidth = Math.max(0, container.clientWidth - horizontalPadding)
+          const measuredWidth = container.clientWidth
+          const fallbackWidth = Math.max(baseViewport.width, 1)
+          const availableWidth = measuredWidth > 0 ? measuredWidth : fallbackWidth
           const maxScale = 1.25
-          const minScale = 0.5
-          let dynamicScale = 1
-          if (availableWidth > 0 && baseViewport.width > 0) {
-            dynamicScale = availableWidth / baseViewport.width
+          let scale = availableWidth / baseViewport.width
+          if (!Number.isFinite(scale) || scale <= 0) {
+            scale = 1
           }
-          const scale = Math.max(minScale, Math.min(maxScale, dynamicScale))
+          scale = Math.min(scale, maxScale)
+
           const viewport = page.getViewport({ scale })
+          const deviceScale = window.devicePixelRatio || 1
+          const renderViewport = deviceScale !== 1
+            ? page.getViewport({ scale: scale * deviceScale })
+            : viewport
 
           const pageWrapper = document.createElement('div')
           pageWrapper.className = 'pdf-page'
-          pageWrapper.style.width = `${viewport.width}px`
-          pageWrapper.style.height = `${viewport.height}px`
-          pageWrapper.style.maxWidth = '100%'
+          pageWrapper.style.width = '100%'
+          pageWrapper.style.maxWidth = `${viewport.width}px`
+          pageWrapper.style.aspectRatio = `${viewport.width} / ${viewport.height}`
           pageWrapper.style.margin = '0 auto'
 
           const canvas = document.createElement('canvas')
-          canvas.width = viewport.width
-          canvas.height = viewport.height
+          canvas.width = renderViewport.width
+          canvas.height = renderViewport.height
+          canvas.style.width = '100%'
+          canvas.style.height = '100%'
           canvas.className = 'pdf-canvas'
           pageWrapper.appendChild(canvas)
 
@@ -281,25 +289,23 @@ function PdfViewerWithHighlights({
           if (context) {
             const renderTask = page.render({
               canvasContext: context,
-              viewport,
+              viewport: renderViewport,
               canvas,
             })
+              activeRenderTasks.push(renderTask)
             await renderTask.promise
           }
 
           const highlightLayer = document.createElement('div')
           highlightLayer.className = 'pdf-highlight-layer'
-          highlightLayer.style.width = `${viewport.width}px`
-          highlightLayer.style.height = `${viewport.height}px`
+          highlightLayer.style.width = '100%'
+          highlightLayer.style.height = '100%'
 
           const pageTokens = extraction
             ? extraction.tokens.filter((token) => token.pageIndex === pageIndex)
             : []
 
           if (highlights.size > 0 && extraction) {
-            const width = viewport.width
-            const height = viewport.height
-
             pageTokens.forEach((token) => {
               if (!highlights.has(token.absoluteIndex)) {
                 return
@@ -308,19 +314,17 @@ function PdfViewerWithHighlights({
               const highlight = document.createElement('div')
               highlight.className = `pdf-highlight ${highlightType}`
               const rect = token.rect
-              const left = rect.x * width
-              const top = rect.y * height
-              const boxWidth = rect.width * width
-              const boxHeight = rect.height * height
+              const widthPercent = rect.width * 100
+              const heightPercent = rect.height * 100
 
-              if (boxWidth <= 0 || boxHeight <= 0) {
+              if (widthPercent <= 0 || heightPercent <= 0) {
                 return
               }
 
-              highlight.style.left = `${left}px`
-              highlight.style.top = `${top}px`
-              highlight.style.width = `${boxWidth}px`
-              highlight.style.height = `${boxHeight}px`
+              highlight.style.left = `${rect.x * 100}%`
+              highlight.style.top = `${rect.y * 100}%`
+              highlight.style.width = `${widthPercent}%`
+              highlight.style.height = `${heightPercent}%`
 
               highlightLayer.appendChild(highlight)
             })
@@ -329,13 +333,22 @@ function PdfViewerWithHighlights({
           pageWrapper.appendChild(highlightLayer)
           container.appendChild(pageWrapper)
         }
-      } catch (renderError) {
-        console.error('Unable to render PDF preview with highlights', renderError)
-        const message =
-          renderError instanceof Error && renderError.message
-            ? renderError.message
-            : 'Unable to load preview.'
-        container.innerHTML = `<div class="pdf-preview-error">${message}</div>`
+        } catch (renderError) {
+          const errorMessage =
+            renderError instanceof Error ? renderError.message : String(renderError)
+          const isExpectedCancellation =
+            renderError instanceof Error &&
+            (renderError.name === 'RenderingCancelledException' ||
+              errorMessage.includes('Rendering cancelled') ||
+              errorMessage.includes('Transport destroyed'))
+
+          if (isExpectedCancellation) {
+            return
+          }
+
+          console.error('Unable to render PDF preview with highlights', renderError)
+          const message = errorMessage || 'Unable to load preview.'
+          container.innerHTML = `<div class="pdf-preview-error">${message}</div>`
       } finally {
         if (pdfInstance) {
           try {
@@ -352,6 +365,13 @@ function PdfViewerWithHighlights({
 
     return () => {
       cancelled = true
+        activeRenderTasks.forEach((task) => {
+          try {
+            task.cancel()
+          } catch (taskError) {
+            console.warn('Failed to cancel render task', taskError)
+          }
+        })
       container.innerHTML = ''
       if (pdfInstance) {
         try {
