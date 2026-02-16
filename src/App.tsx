@@ -14,7 +14,7 @@ import {
 import { InboxOutlined } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
 import type { UploadFile } from 'antd/es/upload/interface'
-import { diffSentences, diffWords, type Change } from 'diff'
+import { diffLines, diffSentences, diffWords, type Change } from 'diff'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
 import type { TextItem } from 'pdfjs-dist/types/src/display/api'
 import pdfWorker from 'pdfjs-dist/build/pdf.worker?url'
@@ -26,9 +26,10 @@ const { Dragger } = Upload
 GlobalWorkerOptions.workerSrc = pdfWorker
 
 const WORD_DIFF_THRESHOLD = 200000
+const PARAGRAPH_DIFF_THRESHOLD = 900000
 const ABSOLUTE_DIFF_LIMIT = 2600000
 
-type DiffMode = 'word' | 'sentence'
+type DiffMode = 'word' | 'paragraph' | 'sentence'
 
 type DiffWorkerRequest = {
   jobId: number
@@ -175,10 +176,15 @@ function App() {
         }
 
           let mode: DiffMode = 'word'
-          if (totalLength > WORD_DIFF_THRESHOLD) {
+          if (totalLength > PARAGRAPH_DIFF_THRESHOLD) {
             mode = 'sentence'
             setComparisonNote(
               'Large documents are compared at sentence level for faster results. Highlights may be less granular.',
+            )
+          } else if (totalLength > WORD_DIFF_THRESHOLD) {
+            mode = 'paragraph'
+            setComparisonNote(
+              'Medium documents are compared at paragraph level to balance speed and detail.',
             )
           }
 
@@ -192,7 +198,11 @@ function App() {
           worker.postMessage(payload)
         } else {
             const parts =
-              mode === 'sentence' ? diffSentences(text1, text2) : diffWords(text1, text2)
+              mode === 'sentence'
+                ? diffSentences(text1, text2)
+                : mode === 'paragraph'
+                ? diffLines(text1, text2)
+                : diffWords(text1, text2)
           setDiffParts(parts)
           setIsComparing(false)
         }

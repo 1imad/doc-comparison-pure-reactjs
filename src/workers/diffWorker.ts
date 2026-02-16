@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
 
-import { diffSentences, diffWords, type Change } from 'diff'
+import { diffLines, diffSentences, diffWords, type Change } from 'diff'
 
-type DiffMode = 'word' | 'sentence'
+type DiffMode = 'word' | 'paragraph' | 'sentence'
 
 type DiffWorkerRequest = {
   jobId: number
@@ -21,7 +21,12 @@ ctx.onmessage = (event: MessageEvent<DiffWorkerRequest>) => {
   const { jobId, text1, text2, mode } = event.data
 
   try {
-    const parts = mode === 'sentence' ? diffSentences(text1, text2) : diffWords(text1, text2)
+    const parts =
+      mode === 'sentence'
+        ? diffSentences(text1, text2)
+        : mode === 'paragraph'
+        ? diffLines(text1, text2)
+        : diffWords(text1, text2)
     const response: DiffWorkerResponse = { type: 'result', jobId, payload: parts }
     ctx.postMessage(response)
   } catch (error) {
