@@ -14,9 +14,15 @@ import {
 import { InboxOutlined } from '@ant-design/icons'
 import type { UploadProps } from 'antd'
 import type { UploadFile } from 'antd/es/upload/interface'
-import { diffLines, diffSentences, diffWords, type Change } from 'diff'
+import {
+  diffArrays,
+  diffLines,
+  diffSentences,
+  diffWords,
+  type Change,
+} from 'diff'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
-import type { TextItem } from 'pdfjs-dist/types/src/display/api'
+import type { PDFDocumentProxy, TextItem } from 'pdfjs-dist/types/src/display/api'
 import pdfWorker from 'pdfjs-dist/build/pdf.worker?url'
 import './App.css'
 
@@ -31,15 +37,46 @@ const ABSOLUTE_DIFF_LIMIT = 2600000
 
 type DiffMode = 'word' | 'paragraph' | 'sentence'
 
+type NormalizedRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+type PdfToken = {
+  text: string
+  pageIndex: number
+  itemIndex: number
+  absoluteIndex: number
+  rect: NormalizedRect
+}
+
+type PdfExtraction = {
+  tokens: PdfToken[]
+  fullText: string
+  pageMetrics: { width: number; height: number }[]
+}
+
+type DiffToken = PdfToken
+
 type DiffWorkerRequest = {
   jobId: number
   text1: string
   text2: string
+  tokens1: DiffToken[]
+  tokens2: DiffToken[]
   mode: DiffMode
 }
 
+type DiffWorkerPayload = {
+  textDiff: Change[]
+  removedTokenIndexes: number[]
+  addedTokenIndexes: number[]
+}
+
 type DiffWorkerResponse =
-  | { type: 'result'; jobId: number; payload: Change[] }
+  | { type: 'result'; jobId: number; payload: DiffWorkerPayload }
   | { type: 'error'; jobId: number; payload: string }
 
 type DiffSegmentType = 'unchanged' | 'added' | 'removed'
@@ -49,47 +86,242 @@ type DiffSegment = {
   type: DiffSegmentType
 }
 
-async function extractTextFromPdf(file: File): Promise<string> {
+async function extractTextFromPdf(file: File): Promise<PdfExtraction> {
   const data = await file.arrayBuffer()
   const pdf = await getDocument({ data }).promise
 
   try {
-    const pageTexts: string[] = []
+    const tokens: PdfToken[] = []
+    const textParts: string[] = []
+    const pageMetrics: { width: number; height: number }[] = []
+    let absoluteIndex = 0
+
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       try {
         const page = await pdf.getPage(pageNumber)
-        const textContent = await page.getTextContent()
-        const pageText = textContent.items
-          .map((item) => ('str' in item ? (item as TextItem).str : ''))
-          .join(' ')
-          .trim()
+        const viewport = page.getViewport({ scale: 1 })
+        pageMetrics.push({ width: viewport.width, height: viewport.height })
 
-        if (pageText.length > 0) {
-          pageTexts.push(pageText)
-        }
+        const textContent = await page.getTextContent()
+
+        let itemIndex = 0
+        textContent.items.forEach((item) => {
+          if (!('str' in item)) {
+            return
+          }
+
+          const textItem = item as TextItem
+          const value = textItem.str.trim()
+          if (!value) {
+            itemIndex += 1
+            return
+          }
+
+          const rectPoints = viewport.convertToViewportRectangle([
+            textItem.transform[4],
+            textItem.transform[5],
+            textItem.transform[4] + textItem.width,
+            textItem.transform[5] - textItem.height,
+          ])
+
+          const [rawX1, rawY1, rawX2, rawY2] = rectPoints
+          const minX = Math.min(rawX1, rawX2)
+          const minY = Math.min(rawY1, rawY2)
+          const width = Math.abs(rawX2 - rawX1)
+          const height = Math.abs(rawY2 - rawY1)
+          const normalizedRect: NormalizedRect = {
+            x: viewport.width === 0 ? 0 : minX / viewport.width,
+            y: viewport.height === 0 ? 0 : minY / viewport.height,
+            width: viewport.width === 0 ? 0 : width / viewport.width,
+            height: viewport.height === 0 ? 0 : height / viewport.height,
+          }
+
+          tokens.push({
+            text: value,
+            pageIndex: pageNumber - 1,
+            itemIndex,
+            absoluteIndex,
+            rect: normalizedRect,
+          })
+          textParts.push(value)
+          absoluteIndex += 1
+          itemIndex += 1
+        })
       } catch (pageError) {
         console.warn(`Unable to extract page ${pageNumber}`, pageError)
       }
     }
 
-    if (pageTexts.length === 0) {
+    if (textParts.length === 0) {
       throw new Error(
         'No searchable text found. The PDF may be scanned, encrypted, or corrupted.',
       )
     }
 
-    return pageTexts.join('\n')
+    return {
+      tokens,
+      fullText: textParts.join(' '),
+      pageMetrics,
+    }
   } finally {
     pdf.destroy()
   }
 }
 
+type PdfViewerWithHighlightsProps = {
+  file: File | null
+  extraction: PdfExtraction | null
+  highlights: Set<number>
+  highlightType: 'added' | 'removed'
+}
+
+function PdfViewerWithHighlights({
+  file,
+  extraction,
+  highlights,
+  highlightType,
+}: PdfViewerWithHighlightsProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) {
+      return
+    }
+
+    container.innerHTML = ''
+
+    if (!file) {
+      return
+    }
+
+    let cancelled = false
+    let pdfInstance: PDFDocumentProxy | null = null
+
+    const renderDocument = async () => {
+      try {
+        const buffer = await file.arrayBuffer()
+        if (cancelled) {
+          return
+        }
+
+        const pdf = await getDocument({ data: buffer }).promise
+        pdfInstance = pdf
+
+        for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
+          if (cancelled) {
+            break
+          }
+
+          const page = await pdf.getPage(pageIndex + 1)
+          const scale = 1.2
+          const viewport = page.getViewport({ scale })
+
+          const pageWrapper = document.createElement('div')
+          pageWrapper.className = 'pdf-page'
+          pageWrapper.style.width = `${viewport.width}px`
+          pageWrapper.style.height = `${viewport.height}px`
+
+          const canvas = document.createElement('canvas')
+          canvas.width = viewport.width
+          canvas.height = viewport.height
+          canvas.className = 'pdf-canvas'
+          pageWrapper.appendChild(canvas)
+
+          const context = canvas.getContext('2d')
+          if (context) {
+            const renderTask = page.render({
+              canvasContext: context,
+              viewport,
+              canvas,
+            })
+            await renderTask.promise
+          }
+
+          const highlightLayer = document.createElement('div')
+          highlightLayer.className = 'pdf-highlight-layer'
+          highlightLayer.style.width = `${viewport.width}px`
+          highlightLayer.style.height = `${viewport.height}px`
+
+          const pageTokens = extraction
+            ? extraction.tokens.filter((token) => token.pageIndex === pageIndex)
+            : []
+
+          if (highlights.size > 0 && extraction) {
+            const width = viewport.width
+            const height = viewport.height
+
+            pageTokens.forEach((token) => {
+              if (!highlights.has(token.absoluteIndex)) {
+                return
+              }
+
+              const highlight = document.createElement('div')
+              highlight.className = `pdf-highlight ${highlightType}`
+              const rect = token.rect
+              const left = rect.x * width
+              const top = rect.y * height
+              const boxWidth = rect.width * width
+              const boxHeight = rect.height * height
+
+              if (boxWidth <= 0 || boxHeight <= 0) {
+                return
+              }
+
+              highlight.style.left = `${left}px`
+              highlight.style.top = `${top}px`
+              highlight.style.width = `${boxWidth}px`
+              highlight.style.height = `${boxHeight}px`
+
+              highlightLayer.appendChild(highlight)
+            })
+          }
+
+          pageWrapper.appendChild(highlightLayer)
+          container.appendChild(pageWrapper)
+        }
+      } catch (renderError) {
+        console.error('Unable to render PDF preview with highlights', renderError)
+        container.innerHTML = '<div class="pdf-preview-error">Unable to load preview.</div>'
+      } finally {
+        if (pdfInstance) {
+          try {
+            pdfInstance.destroy()
+          } catch (destroyError) {
+            console.warn('Failed to destroy PDF instance', destroyError)
+          }
+          pdfInstance = null
+        }
+      }
+    }
+
+    renderDocument()
+
+    return () => {
+      cancelled = true
+      container.innerHTML = ''
+      if (pdfInstance) {
+        try {
+          pdfInstance.destroy()
+        } catch (destroyError) {
+          console.warn('Failed to destroy PDF instance', destroyError)
+        }
+        pdfInstance = null
+      }
+    }
+  }, [file, extraction, highlights, highlightType])
+
+  return <div className="pdf-preview-renderer" ref={containerRef} />
+}
+
 function App() {
   const [pdf1, setPdf1] = useState<File | null>(null)
   const [pdf2, setPdf2] = useState<File | null>(null)
-  const [pdf1Url, setPdf1Url] = useState<string | null>(null)
-  const [pdf2Url, setPdf2Url] = useState<string | null>(null)
+  const [pdf1Extraction, setPdf1Extraction] = useState<PdfExtraction | null>(null)
+  const [pdf2Extraction, setPdf2Extraction] = useState<PdfExtraction | null>(null)
   const [diffParts, setDiffParts] = useState<Change[]>([])
+  const [removedTokenIndexes, setRemovedTokenIndexes] = useState<Set<number>>(new Set())
+  const [addedTokenIndexes, setAddedTokenIndexes] = useState<Set<number>>(new Set())
   const [isComparing, setIsComparing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [comparisonNote, setComparisonNote] = useState<string | null>(null)
@@ -114,10 +346,14 @@ function App() {
       pendingJobIdRef.current = null
 
       if (data.type === 'result') {
-        setDiffParts(data.payload)
+        setDiffParts(data.payload.textDiff)
+        setRemovedTokenIndexes(new Set(data.payload.removedTokenIndexes))
+        setAddedTokenIndexes(new Set(data.payload.addedTokenIndexes))
         setError(null)
       } else {
         setDiffParts([])
+        setRemovedTokenIndexes(new Set())
+        setAddedTokenIndexes(new Set())
         setError(data.payload)
       }
 
@@ -130,6 +366,8 @@ function App() {
       }
 
       setDiffParts([])
+      setRemovedTokenIndexes(new Set())
+      setAddedTokenIndexes(new Set())
       setError('Unable to complete comparison in background worker.')
       pendingJobIdRef.current = null
       setIsComparing(false)
@@ -147,34 +385,6 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!pdf1) {
-      setPdf1Url(null)
-      return
-    }
-
-    const objectUrl = URL.createObjectURL(pdf1)
-    setPdf1Url(objectUrl)
-
-    return () => {
-      URL.revokeObjectURL(objectUrl)
-    }
-  }, [pdf1])
-
-  useEffect(() => {
-    if (!pdf2) {
-      setPdf2Url(null)
-      return
-    }
-
-    const objectUrl = URL.createObjectURL(pdf2)
-    setPdf2Url(objectUrl)
-
-    return () => {
-      URL.revokeObjectURL(objectUrl)
-    }
-  }, [pdf2])
-
-  useEffect(() => {
     let isCancelled = false
 
     const compare = async () => {
@@ -183,16 +393,22 @@ function App() {
         setIsComparing(false)
         setError(null)
         setComparisonNote(null)
+        setPdf1Extraction(null)
+        setPdf2Extraction(null)
+        setRemovedTokenIndexes(new Set())
+        setAddedTokenIndexes(new Set())
         return
       }
 
       setIsComparing(true)
       setError(null)
       setDiffParts([])
+      setRemovedTokenIndexes(new Set())
+      setAddedTokenIndexes(new Set())
       setComparisonNote(null)
 
       try {
-        const [text1, text2] = await Promise.all([
+        const [extraction1, extraction2] = await Promise.all([
           extractTextFromPdf(pdf1),
           extractTextFromPdf(pdf2),
         ])
@@ -201,12 +417,18 @@ function App() {
           return
         }
 
-        const totalLength = text1.length + text2.length
+        setPdf1Extraction(extraction1)
+        setPdf2Extraction(extraction2)
+
+        const totalLength =
+          extraction1.fullText.length + extraction2.fullText.length
         if (totalLength > ABSOLUTE_DIFF_LIMIT) {
           setError(
             `Documents are too large for an in-browser comparison (combined text length ${totalLength.toLocaleString()} characters). Try comparing smaller sections.`,
           )
           setDiffParts([])
+          setRemovedTokenIndexes(new Set())
+          setAddedTokenIndexes(new Set())
           setIsComparing(false)
           setComparisonNote(null)
           return
@@ -227,20 +449,44 @@ function App() {
 
         const worker = workerRef.current
 
+        const requestPayload: DiffWorkerRequest = {
+          jobId: 0,
+          text1: extraction1.fullText,
+          text2: extraction2.fullText,
+          tokens1: extraction1.tokens,
+          tokens2: extraction2.tokens,
+          mode,
+        }
+
         if (worker) {
           jobCounterRef.current += 1
           const jobId = jobCounterRef.current
           pendingJobIdRef.current = jobId
-          const payload: DiffWorkerRequest = { jobId, text1, text2, mode }
-          worker.postMessage(payload)
+          worker.postMessage({ ...requestPayload, jobId })
         } else {
-          const parts =
+          const textDiff =
             mode === 'sentence'
-              ? diffSentences(text1, text2)
+              ? diffSentences(extraction1.fullText, extraction2.fullText)
               : mode === 'paragraph'
-              ? diffLines(text1, text2)
-              : diffWords(text1, text2)
-          setDiffParts(parts)
+              ? diffLines(extraction1.fullText, extraction2.fullText)
+              : diffWords(extraction1.fullText, extraction2.fullText)
+          const tokenDiff = diffArrays(extraction1.tokens, extraction2.tokens, {
+            comparator: (left, right) => left.text === right.text,
+          })
+
+          const removed = new Set<number>()
+          const added = new Set<number>()
+          tokenDiff.forEach((part) => {
+            if (part.removed) {
+              part.value.forEach((token) => removed.add(token.absoluteIndex))
+            } else if (part.added) {
+              part.value.forEach((token) => added.add(token.absoluteIndex))
+            }
+          })
+
+          setDiffParts(textDiff)
+          setRemovedTokenIndexes(removed)
+          setAddedTokenIndexes(added)
           setIsComparing(false)
         }
       } catch (err) {
@@ -257,6 +503,8 @@ function App() {
 
         setError(normalizedMessage)
         setDiffParts([])
+        setRemovedTokenIndexes(new Set())
+        setAddedTokenIndexes(new Set())
         setIsComparing(false)
         setComparisonNote(null)
       }
@@ -308,10 +556,11 @@ function App() {
     return { leftSegments: left, rightSegments: right }
   }, [diffParts])
 
-  const buildUploadProps = (
-    setPdf: (file: File | null) => void,
-    currentFile: File | null,
-  ): UploadProps => ({
+    const buildUploadProps = (
+      setPdf: (file: File | null) => void,
+      currentFile: File | null,
+      setExtraction: (extraction: PdfExtraction | null) => void,
+    ): UploadProps => ({
     name: 'pdf',
     multiple: false,
     accept: '.pdf',
@@ -322,15 +571,19 @@ function App() {
         return false
       }
       setPdf(file)
+        setExtraction(null)
       message.success(`${file.name} ready for comparison`)
       return false
     },
     onRemove: () => {
       setPdf(null)
+        setExtraction(null)
       setDiffParts([])
       setError(null)
       setIsComparing(false)
       setComparisonNote(null)
+        setRemovedTokenIndexes(new Set())
+        setAddedTokenIndexes(new Set())
     },
     fileList: currentFile
       ? ([
@@ -343,8 +596,8 @@ function App() {
       : [],
   })
 
-  const uploadProps1 = buildUploadProps(setPdf1, pdf1)
-  const uploadProps2 = buildUploadProps(setPdf2, pdf2)
+  const uploadProps1 = buildUploadProps(setPdf1, pdf1, setPdf1Extraction)
+  const uploadProps2 = buildUploadProps(setPdf2, pdf2, setPdf2Extraction)
 
   const hasComparisonInputs = Boolean(pdf1 && pdf2)
   const hasDiffHighlights = diffParts.some((part) => part.added || part.removed)
@@ -366,13 +619,18 @@ function App() {
               <p className="ant-upload-hint">Choose the baseline document</p>
             </Dragger>
 
-            <div className={pdf1Url ? 'pdf-preview' : 'pdf-preview empty'}>
-              {pdf1Url ? (
-                <iframe src={pdf1Url} title="First PDF preview" className="pdf-iframe" />
-              ) : (
-                <Text type="secondary">Upload a PDF to see it here.</Text>
-              )}
-            </div>
+              <div className={pdf1 ? 'pdf-preview' : 'pdf-preview empty'}>
+                {pdf1 ? (
+                  <PdfViewerWithHighlights
+                    file={pdf1}
+                    extraction={pdf1Extraction}
+                    highlights={removedTokenIndexes}
+                    highlightType="removed"
+                  />
+                ) : (
+                  <Text type="secondary">Upload a PDF to see it here.</Text>
+                )}
+              </div>
           </Card>
         </Col>
 
@@ -386,13 +644,18 @@ function App() {
               <p className="ant-upload-hint">Choose the document to compare against</p>
             </Dragger>
 
-            <div className={pdf2Url ? 'pdf-preview' : 'pdf-preview empty'}>
-              {pdf2Url ? (
-                <iframe src={pdf2Url} title="Second PDF preview" className="pdf-iframe" />
-              ) : (
-                <Text type="secondary">Upload a PDF to see it here.</Text>
-              )}
-            </div>
+              <div className={pdf2 ? 'pdf-preview' : 'pdf-preview empty'}>
+                {pdf2 ? (
+                  <PdfViewerWithHighlights
+                    file={pdf2}
+                    extraction={pdf2Extraction}
+                    highlights={addedTokenIndexes}
+                    highlightType="added"
+                  />
+                ) : (
+                  <Text type="secondary">Upload a PDF to see it here.</Text>
+                )}
+              </div>
           </Card>
         </Col>
       </Row>

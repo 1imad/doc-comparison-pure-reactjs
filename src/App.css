@@ -93,21 +93,66 @@ body {
 	height: 520px;
 	border: 1px solid #d9d9d9;
 	border-radius: 8px;
-	overflow: hidden;
+	overflow: auto;
 	background: #fafafa;
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: center;
+	padding: 12px;
+	position: relative;
 }
 
 .pdf-preview.empty {
 	border-style: dashed;
 	color: #8c8c8c;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
 }
 
-.pdf-iframe {
+.pdf-preview-renderer {
 	width: 100%;
-	height: 100%;
-	border: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	align-items: center;
+}
+
+.pdf-page {
+	position: relative;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+	border-radius: 6px;
+	overflow: hidden;
 	background: #ffffff;
+}
+
+.pdf-canvas {
+	display: block;
+}
+
+.pdf-highlight-layer {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+.pdf-highlight {
+	position: absolute;
+	border-radius: 2px;
+	mix-blend-mode: multiply;
+	opacity: 0.55;
+}
+
+.pdf-highlight.added {
+	background: #95de64;
+}
+
+.pdf-highlight.removed {
+	background: #ff7875;
+}
+
+.pdf-preview-error {
+	padding: 16px;
+	color: #a8071a;
+	font-size: 14px;
 }
