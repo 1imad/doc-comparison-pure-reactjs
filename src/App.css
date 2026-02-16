@@ -1,0 +1,70 @@
+html,
+body {
+	margin: 0;
+	padding: 0;
+	background: #f5f5f5;
+}
+
+#root {
+	min-height: 100vh;
+}
+
+.page-container {
+	padding: 40px 24px;
+	max-width: 1200px;
+	margin: 0 auto;
+}
+
+.page-title {
+	text-align: center;
+	margin-bottom: 40px;
+}
+
+.result-card {
+	margin-top: 32px;
+}
+
+.result-loading {
+	display: flex;
+	justify-content: center;
+	padding: 32px 0;
+}
+
+.result-content {
+	width: 100%;
+}
+
+.result-summary {
+	display: flex;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.diff-viewer {
+	padding: 16px;
+	border: 1px dashed #d9d9d9;
+	background: #ffffff;
+	border-radius: 8px;
+	white-space: pre-wrap;
+	line-height: 1.6;
+}
+
+.diff-part {
+	color: #1f1f1f;
+}
+
+.diff-part.added {
+	background: #f6ffed;
+	color: #1f5c1b;
+}
+
+.diff-part.removed {
+	background: #fff1f0;
+	color: #a8071a;
+	text-decoration: line-through;
+}
+
+.result-placeholder {
+	margin-top: 32px;
+	text-align: center;
+}
