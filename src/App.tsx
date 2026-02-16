@@ -252,13 +252,24 @@ function PdfViewerWithHighlights({
           }
 
           const page = await pdf.getPage(pageIndex + 1)
-          const scale = 1.2
+          const baseViewport = page.getViewport({ scale: 1 })
+          const horizontalPadding = 24
+          const availableWidth = Math.max(0, container.clientWidth - horizontalPadding)
+          const maxScale = 1.25
+          const minScale = 0.5
+          let dynamicScale = 1
+          if (availableWidth > 0 && baseViewport.width > 0) {
+            dynamicScale = availableWidth / baseViewport.width
+          }
+          const scale = Math.max(minScale, Math.min(maxScale, dynamicScale))
           const viewport = page.getViewport({ scale })
 
           const pageWrapper = document.createElement('div')
           pageWrapper.className = 'pdf-page'
           pageWrapper.style.width = `${viewport.width}px`
           pageWrapper.style.height = `${viewport.height}px`
+          pageWrapper.style.maxWidth = '100%'
+          pageWrapper.style.margin = '0 auto'
 
           const canvas = document.createElement('canvas')
           canvas.width = viewport.width
