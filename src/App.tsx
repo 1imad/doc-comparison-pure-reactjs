@@ -102,7 +102,9 @@ async function extractTextFromPdf(file: File): Promise<PdfExtraction> {
         const viewport = page.getViewport({ scale: 1 })
         pageMetrics.push({ width: viewport.width, height: viewport.height })
 
-        const textContent = await page.getTextContent()
+        const textContent = await page.getTextContent({
+          disableCombineTextItems: true,
+        } as Parameters<typeof page.getTextContent>[0])
 
         let itemIndex = 0
         textContent.items.forEach((item) => {
@@ -111,29 +113,60 @@ async function extractTextFromPdf(file: File): Promise<PdfExtraction> {
           }
 
           const textItem = item as TextItem
-          const value = textItem.str.trim()
+          const value = textItem.str.replace(/\s+/g, ' ').trim()
           if (!value) {
             itemIndex += 1
             return
           }
 
+          const itemWidth =
+            textItem.width || Math.sqrt(textItem.transform[0] ** 2 + textItem.transform[1] ** 2)
+          const rawHeight =
+            textItem.height && textItem.height > 0
+              ? textItem.height
+              : Math.sqrt(textItem.transform[2] ** 2 + textItem.transform[3] ** 2)
+
           const rectPoints = viewport.convertToViewportRectangle([
             textItem.transform[4],
             textItem.transform[5],
-            textItem.transform[4] + textItem.width,
-            textItem.transform[5] - textItem.height,
+            textItem.transform[4] + itemWidth,
+            textItem.transform[5] + rawHeight,
           ])
 
           const [rawX1, rawY1, rawX2, rawY2] = rectPoints
           const minX = Math.min(rawX1, rawX2)
           const minY = Math.min(rawY1, rawY2)
-          const width = Math.abs(rawX2 - rawX1)
-          const height = Math.abs(rawY2 - rawY1)
+          const maxX = Math.max(rawX1, rawX2)
+          const maxY = Math.max(rawY1, rawY2)
+          const width = maxX - minX
+          const height = maxY - minY
+
+          if (width <= 0 || height <= 0) {
+            itemIndex += 1
+            return
+          }
+
+          const clampedMinX = Math.max(0, Math.min(viewport.width, minX))
+          const clampedMinY = Math.max(0, Math.min(viewport.height, minY))
+          const clampedMaxX = Math.max(clampedMinX, Math.min(viewport.width, maxX))
+          const clampedMaxY = Math.max(clampedMinY, Math.min(viewport.height, maxY))
+
           const normalizedRect: NormalizedRect = {
-            x: viewport.width === 0 ? 0 : minX / viewport.width,
-            y: viewport.height === 0 ? 0 : minY / viewport.height,
-            width: viewport.width === 0 ? 0 : width / viewport.width,
-            height: viewport.height === 0 ? 0 : height / viewport.height,
+            x: viewport.width === 0 ? 0 : clampedMinX / viewport.width,
+            y: viewport.height === 0 ? 0 : clampedMinY / viewport.height,
+            width:
+              viewport.width === 0
+                ? 0
+                : (clampedMaxX - clampedMinX) / viewport.width,
+            height:
+              viewport.height === 0
+                ? 0
+                : (clampedMaxY - clampedMinY) / viewport.height,
+          }
+
+          if (normalizedRect.width <= 0 || normalizedRect.height <= 0) {
+            itemIndex += 1
+            return
           }
 
           tokens.push({
@@ -192,6 +225,11 @@ function PdfViewerWithHighlights({
     container.innerHTML = ''
 
     if (!file) {
+      return
+    }
+
+    if (!extraction) {
+      container.innerHTML = '<div class="pdf-preview-placeholder">Generating highlights…</div>'
       return
     }
 
@@ -282,7 +320,11 @@ function PdfViewerWithHighlights({
         }
       } catch (renderError) {
         console.error('Unable to render PDF preview with highlights', renderError)
-        container.innerHTML = '<div class="pdf-preview-error">Unable to load preview.</div>'
+        const message =
+          renderError instanceof Error && renderError.message
+            ? renderError.message
+            : 'Unable to load preview.'
+        container.innerHTML = `<div class="pdf-preview-error">${message}</div>`
       } finally {
         if (pdfInstance) {
           try {
@@ -608,9 +650,9 @@ function App() {
         Compare PDF
       </Title>
 
-      <Row gutter={[24, 24]} justify="center">
-        <Col xs={24} md={12} lg={10}>
-          <Card title="Upload First PDF" bordered>
+      <Row gutter={[24, 24]} justify="space-between" className="upload-row">
+        <Col xs={24} lg={12} xl={12}>
+          <Card title="Upload First PDF" bordered className="upload-card">
             <Dragger {...uploadProps1}>
               <p className="ant-upload-drag-icon">
                 <InboxOutlined />
@@ -634,8 +676,8 @@ function App() {
           </Card>
         </Col>
 
-        <Col xs={24} md={12} lg={10}>
-          <Card title="Upload Second PDF" bordered>
+        <Col xs={24} lg={12} xl={12}>
+          <Card title="Upload Second PDF" bordered className="upload-card">
             <Dragger {...uploadProps2}>
               <p className="ant-upload-drag-icon">
                 <InboxOutlined />

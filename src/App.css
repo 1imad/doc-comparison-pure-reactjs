@@ -10,14 +10,31 @@ body {
 }
 
 .page-container {
-	padding: 40px 24px;
-	max-width: 1200px;
-	margin: 0 auto;
+	width: 100%;
+	max-width: none;
+	padding: 32px 48px 56px;
+	box-sizing: border-box;
 }
 
 .page-title {
 	text-align: center;
 	margin-bottom: 40px;
+}
+
+.upload-row {
+	width: 100%;
+	align-items: stretch;
+}
+
+.upload-card {
+	height: 100%;
+}
+
+.upload-card .ant-card-body {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	height: 100%;
 }
 
 .result-card {
@@ -90,7 +107,9 @@ body {
 
 .pdf-preview {
 	margin-top: 16px;
-	height: 520px;
+	height: calc(100vh - 240px);
+	min-height: 480px;
+	max-height: 900px;
 	border: 1px solid #d9d9d9;
 	border-radius: 8px;
 	overflow: auto;
@@ -100,6 +119,7 @@ body {
 	justify-content: center;
 	padding: 12px;
 	position: relative;
+	flex: 1 1 auto;
 }
 
 .pdf-preview.empty {
@@ -108,6 +128,12 @@ body {
 	align-items: center;
 	justify-content: center;
 	padding: 0;
+}
+
+.pdf-preview-placeholder {
+	padding: 16px;
+	color: #8c8c8c;
+	font-size: 14px;
 }
 
 .pdf-preview-renderer {
@@ -155,4 +181,14 @@ body {
 	padding: 16px;
 	color: #a8071a;
 	font-size: 14px;
+}
+
+@media (max-width: 1200px) {
+	.page-container {
+		padding: 24px 24px 48px;
+	}
+
+	.pdf-preview {
+		height: calc(100vh - 260px);
+	}
 }
