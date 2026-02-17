@@ -1,17 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Typography,
-  Upload,
-  Card,
-  Row,
-  Col,
-  message,
-  Alert,
-  Spin,
-  Space,
-  Tag,
-} from 'antd'
-import { InboxOutlined } from '@ant-design/icons'
+import { Layout, Row, Col, Spin, message, Typography } from 'antd'
 import type { UploadProps } from 'antd'
 import type { UploadFile } from 'antd/es/upload/interface'
 import {
@@ -22,12 +10,18 @@ import {
   type Change,
 } from 'diff'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
-import type { PDFDocumentProxy, RenderTask, TextItem } from 'pdfjs-dist/types/src/display/api'
+import type { TextItem } from 'pdfjs-dist/types/src/display/api'
 import pdfWorker from 'pdfjs-dist/build/pdf.worker?url'
+import AppHeader from './components/AppHeader'
+import HeroSection from './components/HeroSection'
+import UploadPanel from './components/UploadPanel'
+import SideBySidePdfComparison from './components/SideBySidePdfComparison'
+import type { NormalizedRect, PdfExtraction, PdfToken } from './types/pdf'
+import type { DiffStats } from './types/diff'
 import './App.css'
 
-const { Title, Text } = Typography
-const { Dragger } = Upload
+const { Content, Footer } = Layout
+const { Text } = Typography
 
 GlobalWorkerOptions.workerSrc = pdfWorker
 
@@ -36,27 +30,6 @@ const PARAGRAPH_DIFF_THRESHOLD = 900000
 const ABSOLUTE_DIFF_LIMIT = 2600000
 
 type DiffMode = 'word' | 'paragraph' | 'sentence'
-
-type NormalizedRect = {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-type PdfToken = {
-  text: string
-  pageIndex: number
-  itemIndex: number
-  absoluteIndex: number
-  rect: NormalizedRect
-}
-
-type PdfExtraction = {
-  tokens: PdfToken[]
-  fullText: string
-  pageMetrics: { width: number; height: number }[]
-}
 
 type DiffToken = PdfToken
 
@@ -78,13 +51,6 @@ type DiffWorkerPayload = {
 type DiffWorkerResponse =
   | { type: 'result'; jobId: number; payload: DiffWorkerPayload }
   | { type: 'error'; jobId: number; payload: string }
-
-type DiffSegmentType = 'unchanged' | 'added' | 'removed'
-
-type DiffSegment = {
-  value: string
-  type: DiffSegmentType
-}
 
 async function extractTextFromPdf(file: File): Promise<PdfExtraction> {
   const data = await file.arrayBuffer()
@@ -201,192 +167,6 @@ async function extractTextFromPdf(file: File): Promise<PdfExtraction> {
   }
 }
 
-type PdfViewerWithHighlightsProps = {
-  file: File | null
-  extraction: PdfExtraction | null
-  highlights: Set<number>
-  highlightType: 'added' | 'removed'
-}
-
-function PdfViewerWithHighlights({
-  file,
-  extraction,
-  highlights,
-  highlightType,
-}: PdfViewerWithHighlightsProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) {
-      return
-    }
-
-    container.innerHTML = ''
-
-    if (!file) {
-      return
-    }
-
-    if (!extraction) {
-      container.innerHTML = '<div class="pdf-preview-placeholder">Generating highlights…</div>'
-      return
-    }
-
-    let cancelled = false
-      let pdfInstance: PDFDocumentProxy | null = null
-      const activeRenderTasks: RenderTask[] = []
-
-    const renderDocument = async () => {
-      try {
-        const buffer = await file.arrayBuffer()
-        if (cancelled) {
-          return
-        }
-
-        const pdf = await getDocument({ data: buffer }).promise
-        pdfInstance = pdf
-
-        for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
-          if (cancelled) {
-            break
-          }
-
-          const page = await pdf.getPage(pageIndex + 1)
-          const baseViewport = page.getViewport({ scale: 1 })
-          const measuredWidth = container.clientWidth
-          const fallbackWidth = Math.max(baseViewport.width, 1)
-          const availableWidth = measuredWidth > 0 ? measuredWidth : fallbackWidth
-          const maxScale = 1.25
-          let scale = availableWidth / baseViewport.width
-          if (!Number.isFinite(scale) || scale <= 0) {
-            scale = 1
-          }
-          scale = Math.min(scale, maxScale)
-
-          const viewport = page.getViewport({ scale })
-          const deviceScale = window.devicePixelRatio || 1
-          const renderViewport = deviceScale !== 1
-            ? page.getViewport({ scale: scale * deviceScale })
-            : viewport
-
-          const pageWrapper = document.createElement('div')
-          pageWrapper.className = 'pdf-page'
-          pageWrapper.style.width = '100%'
-          pageWrapper.style.maxWidth = `${viewport.width}px`
-          pageWrapper.style.aspectRatio = `${viewport.width} / ${viewport.height}`
-          pageWrapper.style.margin = '0 auto'
-
-          const canvas = document.createElement('canvas')
-          canvas.width = renderViewport.width
-          canvas.height = renderViewport.height
-          canvas.style.width = '100%'
-          canvas.style.height = '100%'
-          canvas.className = 'pdf-canvas'
-          pageWrapper.appendChild(canvas)
-
-          const context = canvas.getContext('2d')
-          if (context) {
-            const renderTask = page.render({
-              canvasContext: context,
-              viewport: renderViewport,
-              canvas,
-            })
-              activeRenderTasks.push(renderTask)
-            await renderTask.promise
-          }
-
-          const highlightLayer = document.createElement('div')
-          highlightLayer.className = 'pdf-highlight-layer'
-          highlightLayer.style.width = '100%'
-          highlightLayer.style.height = '100%'
-
-          const pageTokens = extraction
-            ? extraction.tokens.filter((token) => token.pageIndex === pageIndex)
-            : []
-
-          if (highlights.size > 0 && extraction) {
-            pageTokens.forEach((token) => {
-              if (!highlights.has(token.absoluteIndex)) {
-                return
-              }
-
-              const highlight = document.createElement('div')
-              highlight.className = `pdf-highlight ${highlightType}`
-              const rect = token.rect
-              const widthPercent = rect.width * 100
-              const heightPercent = rect.height * 100
-
-              if (widthPercent <= 0 || heightPercent <= 0) {
-                return
-              }
-
-              highlight.style.left = `${rect.x * 100}%`
-              highlight.style.top = `${rect.y * 100}%`
-              highlight.style.width = `${widthPercent}%`
-              highlight.style.height = `${heightPercent}%`
-
-              highlightLayer.appendChild(highlight)
-            })
-          }
-
-          pageWrapper.appendChild(highlightLayer)
-          container.appendChild(pageWrapper)
-        }
-        } catch (renderError) {
-          const errorMessage =
-            renderError instanceof Error ? renderError.message : String(renderError)
-          const isExpectedCancellation =
-            renderError instanceof Error &&
-            (renderError.name === 'RenderingCancelledException' ||
-              errorMessage.includes('Rendering cancelled') ||
-              errorMessage.includes('Transport destroyed'))
-
-          if (isExpectedCancellation) {
-            return
-          }
-
-          console.error('Unable to render PDF preview with highlights', renderError)
-          const message = errorMessage || 'Unable to load preview.'
-          container.innerHTML = `<div class="pdf-preview-error">${message}</div>`
-      } finally {
-        if (pdfInstance) {
-          try {
-            pdfInstance.destroy()
-          } catch (destroyError) {
-            console.warn('Failed to destroy PDF instance', destroyError)
-          }
-          pdfInstance = null
-        }
-      }
-    }
-
-    renderDocument()
-
-    return () => {
-      cancelled = true
-        activeRenderTasks.forEach((task) => {
-          try {
-            task.cancel()
-          } catch (taskError) {
-            console.warn('Failed to cancel render task', taskError)
-          }
-        })
-      container.innerHTML = ''
-      if (pdfInstance) {
-        try {
-          pdfInstance.destroy()
-        } catch (destroyError) {
-          console.warn('Failed to destroy PDF instance', destroyError)
-        }
-        pdfInstance = null
-      }
-    }
-  }, [file, extraction, highlights, highlightType])
-
-  return <div className="pdf-preview-renderer" ref={containerRef} />
-}
-
 function App() {
   const [pdf1, setPdf1] = useState<File | null>(null)
   const [pdf2, setPdf2] = useState<File | null>(null)
@@ -493,8 +273,7 @@ function App() {
         setPdf1Extraction(extraction1)
         setPdf2Extraction(extraction2)
 
-        const totalLength =
-          extraction1.fullText.length + extraction2.fullText.length
+        const totalLength = extraction1.fullText.length + extraction2.fullText.length
         if (totalLength > ABSOLUTE_DIFF_LIMIT) {
           setError(
             `Documents are too large for an in-browser comparison (combined text length ${totalLength.toLocaleString()} characters). Try comparing smaller sections.`,
@@ -590,7 +369,7 @@ function App() {
     }
   }, [pdf1, pdf2])
 
-  const diffStats = useMemo(() => {
+  const diffStats = useMemo<DiffStats>(() => {
     let added = 0
     let removed = 0
 
@@ -611,29 +390,11 @@ function App() {
     return { added, removed }
   }, [diffParts])
 
-  const { leftSegments, rightSegments } = useMemo(() => {
-    const left: DiffSegment[] = []
-    const right: DiffSegment[] = []
-
-    diffParts.forEach((part) => {
-      if (part.added) {
-        right.push({ value: part.value, type: 'added' })
-      } else if (part.removed) {
-        left.push({ value: part.value, type: 'removed' })
-      } else {
-        left.push({ value: part.value, type: 'unchanged' })
-        right.push({ value: part.value, type: 'unchanged' })
-      }
-    })
-
-    return { leftSegments: left, rightSegments: right }
-  }, [diffParts])
-
-    const buildUploadProps = (
-      setPdf: (file: File | null) => void,
-      currentFile: File | null,
-      setExtraction: (extraction: PdfExtraction | null) => void,
-    ): UploadProps => ({
+  const buildUploadProps = (
+    setPdf: (file: File | null) => void,
+    currentFile: File | null,
+    setExtraction: (extraction: PdfExtraction | null) => void,
+  ): UploadProps => ({
     name: 'pdf',
     multiple: false,
     accept: '.pdf',
@@ -644,19 +405,19 @@ function App() {
         return false
       }
       setPdf(file)
-        setExtraction(null)
+      setExtraction(null)
       message.success(`${file.name} ready for comparison`)
       return false
     },
     onRemove: () => {
       setPdf(null)
-        setExtraction(null)
+      setExtraction(null)
       setDiffParts([])
       setError(null)
       setIsComparing(false)
       setComparisonNote(null)
-        setRemovedTokenIndexes(new Set())
-        setAddedTokenIndexes(new Set())
+      setRemovedTokenIndexes(new Set())
+      setAddedTokenIndexes(new Set())
     },
     fileList: currentFile
       ? ([
@@ -672,160 +433,93 @@ function App() {
   const uploadProps1 = buildUploadProps(setPdf1, pdf1, setPdf1Extraction)
   const uploadProps2 = buildUploadProps(setPdf2, pdf2, setPdf2Extraction)
 
-  const hasComparisonInputs = Boolean(pdf1 && pdf2)
-  const hasDiffHighlights = diffParts.some((part) => part.added || part.removed)
+  const hasBaseline = Boolean(pdf1)
+  const hasRevised = Boolean(pdf2)
+  const hasComparisonInputs = hasBaseline && hasRevised
+  const canShowPreviews = hasComparisonInputs && !isComparing && !error
+  const canShowComparisonPanels = canShowPreviews
+
+  const comparisonComplete = canShowPreviews
+
+  const resetComparison = () => {
+    setPdf1(null)
+    setPdf2(null)
+    setPdf1Extraction(null)
+    setPdf2Extraction(null)
+    setDiffParts([])
+    setRemovedTokenIndexes(new Set())
+    setAddedTokenIndexes(new Set())
+    setError(null)
+    setIsComparing(false)
+    setComparisonNote(null)
+    message.info('Workspace cleared')
+  }
 
   return (
-    <div className="page-container">
-      <Title level={1} className="page-title">
-        Compare PDF
-      </Title>
+    <Layout className="app-shell">
+      <AppHeader hasComparisonInputs={hasComparisonInputs} onReset={resetComparison} />
 
-      <Row gutter={[24, 24]} justify="space-between" className="upload-row">
-        <Col xs={24} lg={12} xl={12}>
-          <Card title="Upload First PDF" bordered className="upload-card">
-            <Dragger {...uploadProps1}>
-              <p className="ant-upload-drag-icon">
-                <InboxOutlined />
-              </p>
-              <p className="ant-upload-text">Click or drag a PDF file into this area</p>
-              <p className="ant-upload-hint">Choose the baseline document</p>
-            </Dragger>
-
-              <div className={pdf1 ? 'pdf-preview' : 'pdf-preview empty'}>
-                {pdf1 ? (
-                  <PdfViewerWithHighlights
-                    file={pdf1}
-                    extraction={pdf1Extraction}
-                    highlights={removedTokenIndexes}
-                    highlightType="removed"
-                  />
-                ) : (
-                  <Text type="secondary">Upload a PDF to see it here.</Text>
-                )}
-              </div>
-          </Card>
-        </Col>
-
-        <Col xs={24} lg={12} xl={12}>
-          <Card title="Upload Second PDF" bordered className="upload-card">
-            <Dragger {...uploadProps2}>
-              <p className="ant-upload-drag-icon">
-                <InboxOutlined />
-              </p>
-              <p className="ant-upload-text">Click or drag a PDF file into this area</p>
-              <p className="ant-upload-hint">Choose the document to compare against</p>
-            </Dragger>
-
-              <div className={pdf2 ? 'pdf-preview' : 'pdf-preview empty'}>
-                {pdf2 ? (
-                  <PdfViewerWithHighlights
-                    file={pdf2}
-                    extraction={pdf2Extraction}
-                    highlights={addedTokenIndexes}
-                    highlightType="added"
-                  />
-                ) : (
-                  <Text type="secondary">Upload a PDF to see it here.</Text>
-                )}
-              </div>
-          </Card>
-        </Col>
-      </Row>
-
-      {hasComparisonInputs && (
-        <Card className="result-card" title="Comparison Result">
+      <Content className="app-content">
+        <div className="page-container">
           {isComparing && (
-            <div className="result-loading">
-              <Spin tip="Extracting text and calculating differences..." />
+            <div className="comparison-loading">
+              <Spin size="large" tip="Generating diff..." />
             </div>
           )}
 
-          {!isComparing && error && <Alert type="error" message={error} showIcon />}
+          <HeroSection
+            diffStats={diffStats}
+            hasComparisonInputs={hasComparisonInputs}
+            comparisonNote={comparisonNote}
+          />
 
-          {!isComparing && !error && (
-            <Space direction="vertical" size={16} className="result-content">
-              {comparisonNote && <Alert type="info" showIcon message={comparisonNote} />}
-
-              <div className="result-summary">
-                <Tag color={diffStats.added > 0 ? 'green' : 'default'}>
-                  {diffStats.added} words added
-                </Tag>
-                <Tag color={diffStats.removed > 0 ? 'red' : 'default'}>
-                  {diffStats.removed} words removed
-                </Tag>
-              </div>
-
-              {hasDiffHighlights ? (
-                <div className="diff-side-by-side">
-                  <div className="diff-column">
-                    <div className="diff-column-title">First PDF</div>
-                    <div className="diff-viewer">
-                      {leftSegments.length > 0 ? (
-                        leftSegments.map((segment, index) => {
-                          const classes = ['diff-part']
-                          if (segment.type === 'added') {
-                            classes.push('added')
-                          } else if (segment.type === 'removed') {
-                            classes.push('removed')
-                          }
-
-                          return (
-                            <span key={`result-left-${index}`} className={classes.join(' ')}>
-                              {segment.value}
-                            </span>
-                          )
-                        })
-                      ) : (
-                        <Text type="secondary">No content.</Text>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="diff-column">
-                    <div className="diff-column-title">Second PDF</div>
-                    <div className="diff-viewer">
-                      {rightSegments.length > 0 ? (
-                        rightSegments.map((segment, index) => {
-                          const classes = ['diff-part']
-                          if (segment.type === 'added') {
-                            classes.push('added')
-                          } else if (segment.type === 'removed') {
-                            classes.push('removed')
-                          }
-
-                          return (
-                            <span key={`result-right-${index}`} className={classes.join(' ')}>
-                              {segment.value}
-                            </span>
-                          )
-                        })
-                      ) : (
-                        <Text type="secondary">No content.</Text>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <Alert
-                  type="success"
-                  showIcon
-                  message="No textual differences detected between the documents."
+          {!comparisonComplete && (
+            <Row gutter={[24, 24]} justify="space-between" className="upload-row">
+              <Col xs={24} lg={12} xl={12}>
+                <UploadPanel
+                  title="Upload First PDF"
+                  hint="Choose the baseline document"
+                  uploadProps={uploadProps1}
                 />
-              )}
-            </Space>
-          )}
-        </Card>
-      )}
+              </Col>
 
-      {!hasComparisonInputs && (
-        <div className="result-placeholder">
-          <Text type="secondary">
-            Upload both PDFs to extract their text and highlight the differences.
-          </Text>
+              <Col xs={24} lg={12} xl={12}>
+                <UploadPanel
+                  title="Upload Second PDF"
+                  hint="Choose the document to compare against"
+                  uploadProps={uploadProps2}
+                />
+              </Col>
+            </Row>
+          )}
+
+          {canShowComparisonPanels && (
+            <SideBySidePdfComparison
+              oldDoc={{
+                label: 'Baseline Document',
+                file: pdf1,
+                extraction: pdf1Extraction,
+                highlights: removedTokenIndexes,
+                highlightType: 'removed',
+              }}
+              newDoc={{
+                label: 'Revised Document',
+                file: pdf2,
+                extraction: pdf2Extraction,
+                highlights: addedTokenIndexes,
+                highlightType: 'added',
+              }}
+              showPreviews={canShowPreviews}
+            />
+          )}
+
         </div>
-      )}
-    </div>
+      </Content>
+
+      <Footer className="app-footer">
+        <Text type="secondary">Confidential • Session isolated in-browser</Text>
+      </Footer>
+    </Layout>
   )
 }
 
